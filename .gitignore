@@ -1,0 +1,33 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+server.js
+
+# Environment — JANGAN PERNAH COMMIT
+.env
+.env.*
+!.env.example
+
+# Backups
+*.bak
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
+
+# Claude Code local
+.claude/
+CLAUDE.local.md
+
+# Temp
+/tmp/
+*.tmp

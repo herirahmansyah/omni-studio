@@ -1,0 +1,12 @@
+{
+  "name": "omni-studio",
+  "private": true,
+  "version": "0.0.0",
+  "scripts": {
+    "dev": "concurrently -n landing,product,transition -c blue,green,magenta \"npm --prefix landing run dev\" \"cross-env PORT=3001 BASE_PATH=/product-studio VITE_BASE_PATH=/product-studio/ npm --prefix omni-product-studio run dev\" \"cross-env PORT=3002 BASE_PATH=/transition-studio VITE_BASE_PATH=/transition-studio/ npm --prefix omni-transition-studio run dev\""
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0",
+    "cross-env": "^7.0.3"
+  }
+}
