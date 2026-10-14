@@ -12,7 +12,9 @@ import {
   ChevronRight,
   RotateCcw
 } from 'lucide-react';
-import { API_BASE } from './apiBase.js';
+import { apiFetch, MissingApiKeyError } from './apiFetch.js';
+import ApiKeyModal from './components/ApiKeyModal.js';
+import { hasApiKey } from './apiKey.js';
 
 interface MediaState {
   url: string;
@@ -144,6 +146,7 @@ export default function App() {
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [activeHistoryId, setActiveHistoryId] = useState<string | null>(null);
   const [isArchiveOpen, setIsArchiveOpen] = useState(false);
+  const [showKeyModal, setShowKeyModal] = useState(!hasApiKey());
   
   const fileInput1Ref = useRef<HTMLInputElement>(null);
   const fileInput2Ref = useRef<HTMLInputElement>(null);
@@ -194,12 +197,12 @@ export default function App() {
       await new Promise(r => setTimeout(r, 4000));
       const elapsed = Math.round((Date.now() - started) / 1000);
       setGeneratingLabel(prev => prev.replace(/( \· \d+s)?$/, ` · ${elapsed}s`));
-      const statusRes = await fetch(`${API_BASE}api/job/${jobId}`);
+      const statusRes = await apiFetch(`api/job/${jobId}`);
       if (!statusRes.ok) throw new Error('Lost connection to the render job.');
       const status = await statusRes.json();
       if (status.status === 'error') throw new Error(status.error || 'Render processing failed.');
       if (status.status === 'done') {
-        const resultRes = await fetch(`${API_BASE}api/job/${jobId}/result`);
+        const resultRes = await apiFetch(`api/job/${jobId}/result`);
         if (!resultRes.ok) throw new Error('Failed to retrieve finished render.');
         const blob = await resultRes.blob();
         return new Promise((resolve, reject) => {
@@ -236,7 +239,7 @@ CRITICAL RULES:
 2. Execute the named technique boldly — this is a showcase transition, not a subtle dissolve.
 3. No hard cuts, no crossfades, no new characters.`;
 
-      const res = await fetch(`${API_BASE}api/omni`, {
+      const res = await apiFetch('api/omni', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -276,6 +279,11 @@ CRITICAL RULES:
         return kept;
       });
     } catch (err: any) {
+      if (err instanceof MissingApiKeyError) {
+        setShowKeyModal(true);
+        setError("Missing Gemini API key — please add your key to render.");
+        return;
+      }
       console.error(err);
       setError(err.message || "An unexpected error occurred during rendering.");
     } finally {
@@ -292,7 +300,7 @@ CRITICAL RULES:
     setGeneratingLabel("Extending Scene...");
     
     try {
-      const res = await fetch(`${API_BASE}api/omni`, {
+      const res = await apiFetch('api/omni', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -314,6 +322,11 @@ CRITICAL RULES:
       setSelectedSegmentIndex(newSegments.length - 1);
       setHistory(hist => hist.map(h => h.id === activeHistoryId ? { ...h, segments: newSegments } : h));
     } catch (err: any) {
+      if (err instanceof MissingApiKeyError) {
+        setShowKeyModal(true);
+        setError("Missing Gemini API key — please add your key to extend.");
+        return;
+      }
       console.error(err);
       setError(err.message || "An unexpected error occurred during extension.");
     } finally {
@@ -359,6 +372,12 @@ CRITICAL RULES:
 
   return (
     <div className="flex h-screen w-full bg-black text-white overflow-hidden select-none font-normal">
+      {/* API key modal (BYOK) */}
+      <ApiKeyModal
+        open={showKeyModal}
+        onClose={() => setShowKeyModal(false)}
+        onSaved={() => setShowKeyModal(false)}
+      />
       
       {/* Reel Archive Panel (Left-aligned, collapsible) */}
       <aside 

@@ -1,5 +1,6 @@
 import React from 'react';
 import { Loader2, AlertTriangle } from 'lucide-react';
+import SecureVideo from './SecureVideo.js';
 
 type AppState = 'IDLE' | 'GENERATING_ATMOSPHERE' | 'GENERATING_PROMPT' | 'GENERATING_VIDEO' | 'VIDEO_READY';
 type LogType = 'info' | 'success' | 'warn' | 'error';
@@ -9,6 +10,7 @@ interface VideoOutputProps {
   appState: AppState;
   videoUrl: string | null;
   logs: LogEntry[];
+  onMissingKey?: () => void;
 }
 
 const logColor = (type: LogType) =>
@@ -34,7 +36,7 @@ const readableError = (raw: string): string => {
   return raw.replace(/^Error:\s*/, '').trim();
 };
 
-export function VideoOutput({ appState, videoUrl, logs }: VideoOutputProps) {
+export function VideoOutput({ appState, videoUrl, logs, onMissingKey }: VideoOutputProps) {
   const generating = appState === 'GENERATING_ATMOSPHERE' || appState === 'GENERATING_PROMPT' || appState === 'GENERATING_VIDEO';
   const lastLog = logs[logs.length - 1];
   const recentLogs = logs.slice(-6);
@@ -47,11 +49,11 @@ export function VideoOutput({ appState, videoUrl, logs }: VideoOutputProps) {
         : 'aspect-video overflow-hidden'
     }`}>
       {appState === 'VIDEO_READY' && videoUrl ? (
-        <video
+        <SecureVideo
           // Omni always returns audio and offers no way to disable it; mute on
-          // playback. Set via ref too — React's `muted` prop alone is unreliable.
-          ref={(el) => { if (el) el.muted = true; }}
-          src={videoUrl}
+          // playback.
+          videoUrl={videoUrl}
+          onMissingKey={onMissingKey}
           controls
           controlsList="nodownload"
           autoPlay

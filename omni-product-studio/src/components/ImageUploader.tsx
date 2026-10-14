@@ -2,7 +2,7 @@ import React, { useRef, useState } from 'react';
 import { Plus, X, Loader2 } from 'lucide-react';
 import { SuggestionChip, MediaSelection } from '../data.js';
 import { fileToDownscaledDataUrl } from '../images.js';
-import { API_BASE } from '../apiBase.js';
+import { apiFetch, MissingApiKeyError } from '../apiFetch.js';
 
 interface ImageUploaderProps {
   title: string;
@@ -11,6 +11,7 @@ interface ImageUploaderProps {
   selection: MediaSelection | null;
   onSelect: React.Dispatch<React.SetStateAction<MediaSelection | null>>;
   disabled?: boolean;
+  onMissingKey?: () => void;
 }
 
 export function ImageUploader({
@@ -20,6 +21,7 @@ export function ImageUploader({
   selection,
   onSelect,
   disabled = false,
+  onMissingKey,
 }: ImageUploaderProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [dragging, setDragging] = useState(false);
@@ -43,7 +45,7 @@ export function ImageUploader({
     setError(null);
 
     try {
-      const res = await fetch(`${API_BASE}api/generate-image`, {
+      const res = await apiFetch('api/generate-image', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ prompt, type }),
@@ -65,6 +67,12 @@ export function ImageUploader({
         throw new Error('Image URL not returned from backend');
       }
     } catch (err: any) {
+      if (err instanceof MissingApiKeyError) {
+        // No key — ask the parent to open the key modal instead of
+        // surfacing this as a form error.
+        onMissingKey?.();
+        return;
+      }
       console.error('Error in image generation:', err);
       setError(err.message || 'Failed to generate image. Please try again.');
     } finally {

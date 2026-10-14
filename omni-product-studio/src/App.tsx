@@ -6,7 +6,10 @@ import { ImageUploader } from './components/ImageUploader.js';
 import { VideoOutput } from './components/VideoOutput.js';
 import { ScrollRow } from './components/ScrollRow.js';
 import { toInlineImages, InlineImage } from './images.js';
-import { API_BASE } from './apiBase.js';
+import { apiFetch, MissingApiKeyError } from './apiFetch.js';
+import ApiKeyModal from './components/ApiKeyModal.js';
+import SecureVideo from './components/SecureVideo.js';
+import { hasApiKey } from './apiKey.js';
 
 type LogType = 'info' | 'success' | 'warn' | 'error';
 type AppState = 'IDLE' | 'GENERATING_ATMOSPHERE' | 'GENERATING_PROMPT' | 'GENERATING_VIDEO' | 'VIDEO_READY';
@@ -38,6 +41,7 @@ export default function App() {
   const [editText, setEditText] = useState('');
   const [promptOpen, setPromptOpen] = useState(false);
   const [downloading, setDownloading] = useState(false);
+  const [showKeyModal, setShowKeyModal] = useState(!hasApiKey());
 
   const [logs, setLogs] = useState<{ id: string; timestamp: string; message: string; type: LogType; image?: string }[]>([]);
 
@@ -87,7 +91,7 @@ export default function App() {
 
   const addVersion = (interactionId: string, fileId: string, promptText: string) => {
     const label = `V${++versionCount.current}`;
-    setVersions(prev => [...prev, { label, interactionId, videoUrl: `${API_BASE}api/video/${fileId}`, prompt: promptText }]);
+    setVersions(prev => [...prev, { label, interactionId, videoUrl: `api/video/${fileId}`, prompt: promptText }]);
     setSelectedLabel(label);
   };
 
@@ -98,7 +102,7 @@ export default function App() {
 
     const interval = setInterval(async () => {
       try {
-        const res = await fetch(`${API_BASE}api/file-status/${fileId}`);
+        const res = await apiFetch(`api/file-status/${fileId}`);
         const data = await res.json();
 
         if (data.state === 'ACTIVE') {
@@ -122,6 +126,12 @@ export default function App() {
           addLog(`Render status: ${data.state}`);
         }
       } catch (e: any) {
+        if (e instanceof MissingApiKeyError) {
+          clearInterval(interval);
+          addLog('Missing Gemini API key — please add your key.', 'error');
+          setShowKeyModal(true);
+          return;
+        }
         addLog(`Polling error: ${e.message}`, 'error');
       }
     }, 5000);
@@ -158,7 +168,7 @@ export default function App() {
         addLog('Writing image prompt (Gemini Flash Lite)…', 'warn');
         addLog('Rendering atmosphere with Nano Banana 2 Lite…', 'warn');
 
-        const atmoRes = await fetch(`${API_BASE}api/generate-atmosphere`, {
+        const atmoRes = await apiFetch('api/generate-atmosphere', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ input: settingInput })
@@ -187,7 +197,7 @@ export default function App() {
 
       setAppState('GENERATING_PROMPT');
       addLog('Requesting Gemini Flash prompt translation...', 'warn');
-      const promptRes = await fetch(`${API_BASE}api/generate-prompt`, {
+      const promptRes = await apiFetch('api/generate-prompt', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ productDesc: product.description, atmosphereDesc, productImages, atmosphereImages })
@@ -202,7 +212,7 @@ export default function App() {
       addLog('Initializing Omni Video Generation pipeline...');
       addLog('Transmitting payloads to Omni...', 'warn');
 
-      const videoRes = await fetch(`${API_BASE}api/generate-video`, {
+      const videoRes = await apiFetch('api/generate-video', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ prompt: generatedPrompt, productImages, atmosphereImages })
@@ -213,6 +223,12 @@ export default function App() {
       addLog(`Interaction created successfully. ID: ${videoData.interactionId}`, 'success');
       pollVideoStatus(videoData.fileId, videoData.interactionId, generatedPrompt, true);
     } catch (e: any) {
+      if (e instanceof MissingApiKeyError) {
+        setShowKeyModal(true);
+        setAppState('IDLE');
+        addLog('Missing Gemini API key — please add your key.', 'error');
+        return;
+      }
       setAppState('IDLE');
       addLog(`Error: ${e.message}`, 'error');
     }
@@ -232,7 +248,7 @@ export default function App() {
     addLog('Transmitting edit to Omni...', 'warn');
 
     try {
-      const res = await fetch(`${API_BASE}api/edit-video`, {
+      const res = await apiFetch('api/edit-video', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ previousInteractionId: fromInteractionId, instructions })
@@ -243,6 +259,12 @@ export default function App() {
       addLog(`Edit interaction created: ${data.interactionId}`, 'success');
       pollVideoStatus(data.fileId, data.interactionId, instructions, false);
     } catch (e: any) {
+      if (e instanceof MissingApiKeyError) {
+        setShowKeyModal(true);
+        setAppState('VIDEO_READY');
+        addLog('Missing Gemini API key — please add your key.', 'error');
+        return;
+      }
       setAppState('VIDEO_READY');
       addLog(`Edit failed: ${e.message}`, 'error');
     }
@@ -260,7 +282,7 @@ export default function App() {
   const downloadVideo = async (version: VideoVersion) => {
     setDownloading(true);
     try {
-      const res = await fetch(version.videoUrl, { credentials: 'include' });
+      const res = await apiFetch(version.videoUrl, { credentials: 'include' });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
@@ -272,6 +294,10 @@ export default function App() {
       a.remove();
       URL.revokeObjectURL(url);
     } catch (e: any) {
+      if (e instanceof MissingApiKeyError) {
+        setShowKeyModal(true);
+        return;
+      }
       addLog(`Download failed: ${e.message}`, 'error');
     } finally {
       setDownloading(false);
@@ -302,6 +328,7 @@ export default function App() {
             selection={product}
             onSelect={setProduct}
             disabled={isGenerating}
+            onMissingKey={() => setShowKeyModal(true)}
           />
 
           <ImageUploader
@@ -311,6 +338,7 @@ export default function App() {
             selection={atmosphere}
             onSelect={selectAtmosphere}
             disabled={isGenerating}
+            onMissingKey={() => setShowKeyModal(true)}
           />
 
           {/* Persistent submit — writes the prompt and renders in one go.
@@ -351,11 +379,14 @@ export default function App() {
                 {otherVersions.map(v => (
                   <button key={v.label} onClick={() => selectVersion(v.label)} className="group flex-none text-left">
                     <div className="font-mono text-xs uppercase tracking-widest text-zinc-400 group-hover:text-white mb-1.5 transition-colors">{v.label}</div>
-                    <video
-                      src={v.videoUrl}
+                    <SecureVideo
+                      videoUrl={v.videoUrl}
+                      lazy={true}
                       muted
                       playsInline
                       preload="metadata"
+                      controls={false}
+                      onMissingKey={() => setShowKeyModal(true)}
                       className="w-40 aspect-video object-cover bg-black opacity-70 group-hover:opacity-100 transition-opacity"
                     />
                   </button>
@@ -394,7 +425,7 @@ export default function App() {
               )}
             </div>
             <div className="flex-1 min-w-0">
-              <VideoOutput appState={appState} videoUrl={selected?.videoUrl ?? null} logs={logs} />
+              <VideoOutput appState={appState} videoUrl={selected?.videoUrl ?? null} logs={logs} onMissingKey={() => setShowKeyModal(true)} />
             </div>
           </div>
 
@@ -478,6 +509,13 @@ export default function App() {
           )}
         </div>
       </div>
+
+      {/* API key modal (BYOK) */}
+      <ApiKeyModal
+        open={showKeyModal}
+        onClose={() => setShowKeyModal(false)}
+        onSaved={() => setShowKeyModal(false)}
+      />
 
       {/* FOOTER — usage disclaimer */}
       <footer className="shrink-0 border-t border-zinc-800/60 bg-zinc-950 px-6 md:px-10 py-3">
