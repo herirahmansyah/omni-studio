@@ -8,22 +8,46 @@ import { GoogleGenAI, Type } from '@google/genai';
 // In AI Studio these vars are injected at runtime, so this is a no-op there.
 dotenv.config({ path: ['.env.local', '.env'] });
 
-let aiClient: GoogleGenAI | null = null;
+// BYOK: cache AI clients by API key (LRU cap 100).
+const AI_CLIENT_CACHE_MAX = 100;
+const aiClientCache = new Map<string, GoogleGenAI>();
 
-function getAiClient() {
-  if (!aiClient) {
-    if (!process.env.GEMINI_API_KEY) {
-      throw new Error('GEMINI_API_KEY environment variable is missing');
-    }
-    // Video generation/editing runs with background:false, so interactions.create
-    // blocks until the render finishes (1–3 min). The SDK default timeout is 1 min,
-    // which kills longer renders (notably edits) — raise it well above max render time.
-    aiClient = new GoogleGenAI({
-      apiKey: process.env.GEMINI_API_KEY,
-      httpOptions: { timeout: 300000 }, // 5 minutes
-    });
+function getAiClient(apiKey: string): GoogleGenAI {
+  let client = aiClientCache.get(apiKey);
+  if (client) {
+    // Refresh LRU position
+    aiClientCache.delete(apiKey);
+    aiClientCache.set(apiKey, client);
+    return client;
   }
-  return aiClient;
+  client = new GoogleGenAI({
+    apiKey,
+    httpOptions: { timeout: 300000 },
+  });
+  if (aiClientCache.size >= AI_CLIENT_CACHE_MAX) {
+    const oldest = aiClientCache.keys().next().value;
+    if (oldest) aiClientCache.delete(oldest);
+  }
+  aiClientCache.set(apiKey, client);
+  return client;
+}
+
+/**
+ * Resolve the API key for a request:
+ * 1. X-Gemini-Key header (BYOK, production)
+ * 2. GEMINI_API_KEY env var (dev fallback)
+ * Throws MissingApiKeyError if neither.
+ */
+class MissingApiKeyError extends Error {
+  constructor() { super('Missing Gemini API key'); }
+}
+
+function resolveApiKey(req: express.Request): string {
+  const headerKey = req.header('X-Gemini-Key');
+  if (headerKey && headerKey.trim().length > 0) return headerKey.trim();
+  const envKey = process.env.GEMINI_API_KEY;
+  if (envKey && envKey.length > 0) return envKey;
+  throw new MissingApiKeyError();
 }
 
 // Product and atmosphere reference images arrive from the client as base64
@@ -99,10 +123,9 @@ No title, notes or quotes. The suppression line is the only place the word "prod
 
 // gemini-3.1-flash-lite-image with delivery:'inline' returns image bytes in the response, but
 // fall back to downloading the File API uri if a uri ever comes back instead.
-async function fileUriToBase64(uri: string): Promise<{ data: string; mimeType: string }> {
+async function fileUriToBase64(uri: string, apiKey: string): Promise<{ data: string; mimeType: string }> {
   const fileId = uri.match(/files\/([a-zA-Z0-9_-]+)/)?.[1];
   if (!fileId) throw new Error('Could not parse file id from image uri');
-  const apiKey = process.env.GEMINI_API_KEY;
   const url = `https://generativelanguage.googleapis.com/v1beta/files/${fileId}:download?alt=media&key=${apiKey}`;
   const upstream = await fetch(url);
   if (!upstream.ok) throw new Error(`Failed to download generated image: ${upstream.statusText}`);
@@ -118,11 +141,32 @@ async function startServer() {
 
   router.use(express.json({ limit: '50mb' }));
 
+// Catch missing API key before route handlers run.
+router.use((req: express.Request, res: express.Response, next: express.NextFunction) => {
+  // Only protect /api/* routes
+  if (!req.path.startsWith('/api/')) return next();
+  // /api/video/:fileId uses direct fetch — still needs key
+  // But allow OPTIONS for CORS preflight
+  if (req.method === 'OPTIONS') return next();
+  try {
+    resolveApiKey(req);
+    next();
+  } catch (e) {
+    if (e instanceof MissingApiKeyError) {
+      return res.status(401).json({
+        error: 'Missing Gemini API key. Provide it via X-Gemini-Key header.',
+        code: 'MISSING_API_KEY',
+      });
+    }
+    next(e);
+  }
+});
+
   // Endpoint to generate prompt
   router.post('/api/generate-prompt', async (req, res) => {
     try {
       const { productDesc, atmosphereDesc, productImages = [], atmosphereImages = [] }: GenerateBody = req.body;
-      const ai = getAiClient();
+      const ai = getAiClient(resolveApiKey(req));
       const promptWriterSystemInstruction = `## Role
 You are an elite product-film director, editor and Gemini Omni prompt engineer in one box. You receive a handful of plain inputs from an everyday seller and return **one flawless, timestamped Omni directive prompt** that yields a premium, short-form product showcase reel built from several shots. You direct like a luxury commercial and cut like a master editor. Your taste *is* the product: restrained, expensive, clarifying. Never slop, never gimmick, never overclaim.
 
@@ -215,7 +259,7 @@ Materials and physics: <how light and matter behave securely>. Audio: near-silen
         res.status(400).json({ error: 'No images provided' });
         return;
       }
-      const ai = getAiClient();
+      const ai = getAiClient(resolveApiKey(req));
 
       const productInstruction = `You write ultra-concise product descriptions for a premium product-film tool.
 Given product reference image(s), output ONE short description (1–2 sentences, plain language): what the product is, plus its key aesthetic and material details. Match the voice of these examples:
@@ -265,7 +309,7 @@ Output ONLY the style brief text — no labels, no quotes, no preamble.`;
         res.status(400).json({ error: 'No atmosphere prompt provided' });
         return;
       }
-      const ai = getAiClient();
+      const ai = getAiClient(resolveApiKey(req));
 
       // Stage 1 — interpret the user's setting into an on-aesthetic image prompt.
       const promptResponse = await ai.models.generateContent({
@@ -296,7 +340,7 @@ Output ONLY the style brief text — no labels, no quotes, no preamble.`;
       const image = interaction.output_image;
       let data = image?.data;
       let mimeType: string = image?.mime_type || 'image/jpeg';
-      if (!data && image?.uri) ({ data, mimeType } = await fileUriToBase64(image.uri));
+      if (!data && image?.uri) ({ data, mimeType } = await fileUriToBase64(image.uri, resolveApiKey(req)));
       if (!data) throw new Error('gemini-3.1-flash-lite-image returned no image');
 
       res.json({ image: { data, mimeType }, prompt: imagePrompt });
@@ -310,7 +354,7 @@ Output ONLY the style brief text — no labels, no quotes, no preamble.`;
   router.post('/api/generate-video', async (req, res) => {
     try {
       const { prompt, productImages = [], atmosphereImages = [] }: GenerateBody & { prompt?: string } = req.body;
-      const ai = getAiClient();
+      const ai = getAiClient(resolveApiKey(req));
 
       console.log(`Sending request to Gemini Omni (${productImages.length} product, ${atmosphereImages.length} atmosphere images)...`);
 
@@ -356,7 +400,7 @@ Output ONLY the style brief text — no labels, no quotes, no preamble.`;
         res.status(400).json({ error: 'previousInteractionId and instructions are required' });
         return;
       }
-      const ai = getAiClient();
+      const ai = getAiClient(resolveApiKey(req));
 
       console.log(`Editing interaction ${previousInteractionId}...`);
       const interaction = await ai.interactions.create({
@@ -387,7 +431,7 @@ Output ONLY the style brief text — no labels, no quotes, no preamble.`;
   router.get('/api/file-status/:fileId', async (req, res) => {
     try {
       const { fileId } = req.params;
-      const ai = getAiClient();
+      const ai = getAiClient(resolveApiKey(req));
       
       const fInfo = await ai.files.get({ name: `files/${fileId}` });
       const state = (fInfo.state as any)?.name || fInfo.state;
@@ -410,7 +454,7 @@ Output ONLY the style brief text — no labels, no quotes, no preamble.`;
 
       let buffer = videoCache.get(fileId);
       if (!buffer) {
-        const apiKey = process.env.GEMINI_API_KEY;
+        const apiKey = resolveApiKey(req);
         const url = `https://generativelanguage.googleapis.com/v1beta/files/${fileId}:download?alt=media&key=${apiKey}`;
         const upstream = await fetch(url);
         if (!upstream.ok) {
@@ -458,7 +502,7 @@ Output ONLY the style brief text — no labels, no quotes, no preamble.`;
   router.post("/api/generate", async (req, res) => {
     try {
       const { prompt } = req.body;
-      const ai = getAiClient();
+      const ai = getAiClient(resolveApiKey(req));
       const textResponse = await ai.models.generateContent({
         model: "gemini-3.1-flash-lite",
         contents: prompt,
@@ -495,7 +539,7 @@ Output ONLY the style brief text — no labels, no quotes, no preamble.`;
       if (!prompt) {
         return res.status(400).json({ error: "Prompt is required" });
       }
-      const ai = getAiClient();
+      const ai = getAiClient(resolveApiKey(req));
 
       let prefix = "Strictly professional, elegant, highly detailed color photography. High-resolution, cinematic lighting, realistic vibrant colors, crisp focus. Single cohesive image, no text inside the image, no grid layout, no multiple panels. ";
       if (type === 'product') {

@@ -23,14 +23,49 @@ function mapResolution(qualityOrTarget?: string): 'low' | 'medium' | 'high' | 'u
   return 'high';
 }
 
-const ai = new GoogleGenAI({
-  apiKey: process.env.GEMINI_API_KEY,
-  httpOptions: {
-    headers: {
-      'User-Agent': 'aistudio-build',
+// BYOK: cache AI clients by API key (LRU cap 100).
+const AI_CLIENT_CACHE_MAX = 100;
+const aiClientCache = new Map<string, GoogleGenAI>();
+
+function getAiClient(apiKey: string): GoogleGenAI {
+  let client = aiClientCache.get(apiKey);
+  if (client) {
+    // Refresh LRU position
+    aiClientCache.delete(apiKey);
+    aiClientCache.set(apiKey, client);
+    return client;
+  }
+  client = new GoogleGenAI({
+    apiKey,
+    httpOptions: {
+      headers: { 'User-Agent': 'aistudio-build' },
     },
-  },
-});
+  });
+  if (aiClientCache.size >= AI_CLIENT_CACHE_MAX) {
+    const oldest = aiClientCache.keys().next().value;
+    if (oldest) aiClientCache.delete(oldest);
+  }
+  aiClientCache.set(apiKey, client);
+  return client;
+}
+
+/**
+ * Resolve the API key for a request:
+ * 1. X-Gemini-Key header (BYOK, production)
+ * 2. GEMINI_API_KEY env var (dev fallback)
+ * Throws MissingApiKeyError if neither.
+ */
+class MissingApiKeyError extends Error {
+  constructor() { super('Missing Gemini API key'); }
+}
+
+function resolveApiKey(req: express.Request): string {
+  const headerKey = req.header('X-Gemini-Key');
+  if (headerKey && headerKey.trim().length > 0) return headerKey.trim();
+  const envKey = process.env.GEMINI_API_KEY;
+  if (envKey && envKey.length > 0) return envKey;
+  throw new MissingApiKeyError();
+}
 
 async function startServer() {
   const app = express();
@@ -48,6 +83,29 @@ async function startServer() {
   // Increase payload limit to handle base64 video uploads
   router.use(express.json({ limit: '500mb' }));
   router.use(express.urlencoded({ limit: '500mb', extended: true }));
+
+  // Catch missing API key before route handlers run.
+  router.use((req: express.Request, res: express.Response, next: express.NextFunction) => {
+    // Only protect /api/* routes
+    if (!req.path.startsWith('/api/')) return next();
+    // /api/job/:id and /api/job/:id/result don't need key (job lookup only)
+    // /api/health is a public health check
+    // But allow OPTIONS for CORS preflight
+    if (req.method === 'OPTIONS') return next();
+    if (req.path === '/api/health') return next();  // health check is public
+    try {
+      resolveApiKey(req);
+      next();
+    } catch (e) {
+      if (e instanceof MissingApiKeyError) {
+        return res.status(401).json({
+          error: 'Missing Gemini API key. Provide it via X-Gemini-Key header.',
+          code: 'MISSING_API_KEY',
+        });
+      }
+      next(e);
+    }
+  });
 
   // Handle body parser errors
   router.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
@@ -71,11 +129,12 @@ async function startServer() {
       inputParts.push({ type: 'video', data: video, mime_type: mimeType || 'video/mp4' });
       // FALLBACK (no API field found): No dedicated upscale request parameter
       inputParts.push({ type: 'text', text: `Task: Upscale this video to ${target === '4k' ? '4K (ultra high)' : '1080p (high)'} resolution. Maintain exact content.` });
-      
+
       const jobId = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
       jobs.set(jobId, { status: 'pending', createdAt: Date.now() });
       res.json({ jobId });
 
+      const ai = getAiClient(resolveApiKey(req));
       (async () => {
         try {
           const interaction = await ai.interactions.create(
@@ -182,11 +241,12 @@ async function startServer() {
       if (mode === 'extend' && responseFormat.type === 'video') {
         responseFormat.duration = '10s';
       }
-      
+
       const jobId = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
       jobs.set(jobId, { status: 'pending', createdAt: Date.now() });
       res.json({ jobId });
 
+      const ai = getAiClient(resolveApiKey(req));
       (async () => {
         try {
           const interaction = await ai.interactions.create(
