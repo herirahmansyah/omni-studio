@@ -88,7 +88,7 @@ export default function ApiKeyModal({ open, onClose, onSaved }: ApiKeyModalProps
             onKeyDown={(e: React.KeyboardEvent) => {
               if (e.key === 'Enter') handleSave();
             }}
-            placeholder="AIza…"
+            placeholder="Paste your API key…"
             autoComplete="off"
             spellCheck={false}
             className="min-w-0 flex-1 rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2.5 font-mono text-sm text-zinc-100 placeholder-zinc-600 focus:outline-none focus:ring-2 focus:ring-white focus:border-transparent"
@@ -103,7 +103,7 @@ export default function ApiKeyModal({ open, onClose, onSaved }: ApiKeyModalProps
         </div>
         {value.trim().length > 0 && !valid && (
           <p className="mt-2 font-mono text-xs text-red-400">
-            Key should start with “AIza” and be at least 20 characters.
+            Key must be at least 20 characters.
           </p>
         )}
 

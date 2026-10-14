@@ -31,5 +31,8 @@ export function hasApiKey(): boolean {
 
 export function isValidKeyFormat(key: string): boolean {
   const trimmed = key.trim();
-  return trimmed.startsWith('AIza') && trimmed.length >= 20;
+  // Gemini API key formats vary and don't share a fixed prefix; only
+  // enforce a minimum length to catch obvious typos. The server / Google
+  // API will reject invalid keys with a clear error.
+  return trimmed.length >= 20;
 }
